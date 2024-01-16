@@ -21,5 +21,9 @@ docker run -it --rm --name kong \
     -p 8443:8443 \
     -p 8001:8001 \
     -p 8444:8444 \
+    -p 8002:8002 \
+    -p 8445:8445 \
+    -p 8003:8003 \
+    -p 8004:8004 \
     isalami/kong-gateway-wallarm:2.8
 ```

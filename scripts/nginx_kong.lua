@@ -16,6 +16,10 @@ lua_ssl_trusted_certificate '${{LUA_SSL_TRUSTED_CERTIFICATE_COMBINED}}';
 > end
 
 lua_shared_dict kong                        5m;
+lua_shared_dict kong_vitals                 5m;
+lua_shared_dict kong_counters               5m;
+lua_shared_dict kong_vitals_counters        5m;
+lua_shared_dict kong_vitals_lists           5m;
 lua_shared_dict kong_locks                  8m;
 lua_shared_dict kong_healthchecks           5m;
 lua_shared_dict kong_process_events         5m;
@@ -25,8 +29,11 @@ lua_shared_dict kong_core_db_cache          ${{MEM_CACHE_SIZE}};
 lua_shared_dict kong_core_db_cache_miss     12m;
 lua_shared_dict kong_db_cache               ${{MEM_CACHE_SIZE}};
 lua_shared_dict kong_db_cache_miss          12m;
-> if role == "data_plane" then
-lua_shared_dict wrpc_channel_dict           5m;
+> if database == "off" then
+lua_shared_dict kong_core_db_cache_2        ${{MEM_CACHE_SIZE}};
+lua_shared_dict kong_core_db_cache_miss_2   12m;
+lua_shared_dict kong_db_cache_2             ${{MEM_CACHE_SIZE}};
+lua_shared_dict kong_db_cache_miss_2        12m;
 > end
 > if database == "cassandra" then
 lua_shared_dict kong_cassandra              5m;
@@ -51,13 +58,54 @@ init_worker_by_lua_block {
     Kong.init_worker()
 }
 
-exit_worker_by_lua_block {
-    Kong.exit_worker()
-}
-
 > if (role == "traditional" or role == "data_plane") and #proxy_listeners > 0 then
+log_format kong_log_format '$remote_addr - $remote_user [$time_local] '
+                           '"$request" $status $body_bytes_sent '
+                           '"$http_referer" "$http_user_agent" ';
+
 # Load variable indexes
-lua_kong_load_var_index default;
+lua_kong_load_var_index $args;
+lua_kong_load_var_index $bytes_sent;
+lua_kong_load_var_index $content_type;
+lua_kong_load_var_index $host;
+lua_kong_load_var_index $http_authorization;
+lua_kong_load_var_index $http_connection;
+lua_kong_load_var_index $http_host;
+lua_kong_load_var_index $http_kong_debug;
+lua_kong_load_var_index $http_proxy;
+lua_kong_load_var_index $http_proxy_connection;
+lua_kong_load_var_index $http_te;
+lua_kong_load_var_index $http_upgrade;
+lua_kong_load_var_index $http_x_forwarded_for;
+lua_kong_load_var_index $http_x_forwarded_host;
+lua_kong_load_var_index $http_x_forwarded_path;
+lua_kong_load_var_index $http_x_forwarded_port;
+lua_kong_load_var_index $http_x_forwarded_prefix;
+lua_kong_load_var_index $http_x_forwarded_proto;
+lua_kong_load_var_index $https;
+lua_kong_load_var_index $http2;
+lua_kong_load_var_index $is_args;
+lua_kong_load_var_index $realip_remote_addr;
+lua_kong_load_var_index $realip_remote_port;
+lua_kong_load_var_index $remote_addr;
+lua_kong_load_var_index $remote_port;
+lua_kong_load_var_index $request;
+lua_kong_load_var_index $request_length;
+lua_kong_load_var_index $request_method;
+lua_kong_load_var_index $request_time;
+lua_kong_load_var_index $request_uri;
+lua_kong_load_var_index $scheme;
+lua_kong_load_var_index $server_addr;
+lua_kong_load_var_index $server_port;
+lua_kong_load_var_index $ssl_cipher;
+lua_kong_load_var_index $ssl_client_raw_cert;
+lua_kong_load_var_index $ssl_client_verify;
+lua_kong_load_var_index $ssl_protocol;
+lua_kong_load_var_index $ssl_server_name;
+lua_kong_load_var_index $upstream_http_connection;
+lua_kong_load_var_index $upstream_http_trailer;
+lua_kong_load_var_index $upstream_http_upgrade;
+lua_kong_load_var_index $upstream_status;
 
 upstream kong_upstream {
     server 0.0.0.1;
@@ -78,13 +126,14 @@ server {
     listen $(entry.listener);
 > end
     wallarm_mode monitoring;
-    wallarm_application -1;
+    wallarm_application 1;
     disable_acl "off";
 
-    error_page 400 404 405 408 411 412 413 414 417 494 /kong_error_handler;
+    error_page 400 404 405 408 411 413 414 417 494 /kong_error_handler;
     error_page 500 502 503 504                     /kong_error_handler;
 
-    access_log ${{PROXY_ACCESS_LOG}};
+
+    access_log ${{PROXY_ACCESS_LOG}} kong_log_format;
     error_log  ${{PROXY_ERROR_LOG}} ${{LOG_LEVEL}};
 
 > if proxy_ssl_enabled then
@@ -370,6 +419,12 @@ server {
         }
     }
 
+    location /nginx_status {
+        internal;
+        access_log off;
+        stub_status;
+    }
+
     location /robots.txt {
         return 200 'User-agent: *\nDisallow: /';
     }
@@ -409,6 +464,12 @@ server {
         }
     }
 
+    location /nginx_status {
+        internal;
+        access_log off;
+        stub_status;
+    }
+
     location /robots.txt {
         return 200 'User-agent: *\nDisallow: /';
     }
@@ -423,7 +484,6 @@ server {
 > end
 
     access_log ${{ADMIN_ACCESS_LOG}};
-    error_log  ${{ADMIN_ERROR_LOG}} ${{LOG_LEVEL}};
 
 > if cluster_mtls == "shared" then
     ssl_verify_client   optional_no_ca;
@@ -436,25 +496,11 @@ server {
     ssl_certificate_key ${{CLUSTER_CERT_KEY}};
     ssl_session_cache   shared:ClusterSSL:10m;
 
-    location = /v1/wrpc {
+    location = /v1/outlet {
         content_by_lua_block {
-            Kong.serve_wrpc_listener()
+            Kong.serve_cluster_listener()
         }
     }
-
 }
 > end -- role == "control_plane"
-
-> if not legacy_worker_events then
-server {
-    server_name kong_worker_events;
-    listen unix:${{PREFIX}}/worker_events.sock;
-    access_log off;
-    location / {
-        content_by_lua_block {
-          require("resty.events.compat").run()
-        }
-    }
-}
-> end -- not legacy_worker_events
 ]]

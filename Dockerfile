@@ -1,4 +1,4 @@
-FROM kong:3.1.1-ubuntu
+FROM kong/kong-gateway:2.8.2.3-ubuntu
 
 USER root
 ADD scripts /build
